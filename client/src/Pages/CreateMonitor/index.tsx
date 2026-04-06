@@ -197,6 +197,17 @@ const CreateMonitorPage = () => {
 		data: existingMonitor ?? null,
 		defaultType,
 	});
+	const notificationOptions = useMemo(
+		() => (notifications ?? []).map((notification) => ({ ...notification, name: notification.notificationName })),
+		[notifications]
+	);
+	const initialEscalationConfig = existingMonitor?.notificationConfig?.find((config) => config.escalation);
+	const [escalationDelayMinutes, setEscalationDelayMinutes] = useState<number>(
+		initialEscalationConfig?.escalation?.delayMinutes ?? 15
+	);
+	const [escalationChannelIds, setEscalationChannelIds] = useState<string[]>(
+		initialEscalationConfig?.escalation?.channelId ? [initialEscalationConfig.escalation.channelId] : []
+	);
 
 	const form = useForm<MonitorFormData>({
 		resolver: zodResolver(schema),
@@ -216,6 +227,12 @@ const CreateMonitorPage = () => {
 	useEffect(() => {
 		clearErrors();
 	}, [watchedType, clearErrors]);
+
+	useEffect(() => {
+		const escalationConfig = existingMonitor?.notificationConfig?.find((config) => config.escalation);
+		setEscalationDelayMinutes(escalationConfig?.escalation?.delayMinutes ?? 15);
+		setEscalationChannelIds(escalationConfig?.escalation?.channelId ? [escalationConfig.escalation.channelId] : []);
+	}, [existingMonitor]);
 
 	const generalSettingsConfig = useMemo(
 		() => getGeneralSettingsConfig(watchedType, t),
@@ -252,11 +269,23 @@ const CreateMonitorPage = () => {
 	};
 
 	const onSubmit = async (data: MonitorFormData) => {
+		const notificationConfig = escalationChannelIds.map((channelId) => ({
+			channelId,
+			escalation: {
+				delayMinutes: Math.max(1, escalationDelayMinutes),
+				channelId,
+			},
+		}));
+
 		let result;
+		const payload = {
+			...data,
+			notificationConfig,
+		};
 		if (isEditMode && monitorId) {
-			result = await patch(`/monitors/${monitorId}`, data);
+			result = await patch(`/monitors/${monitorId}`, payload);
 		} else {
-			result = await post("/monitors", data);
+			result = await post("/monitors", payload);
 		}
 
 		if (result?.success) {
@@ -705,11 +734,6 @@ const CreateMonitorPage = () => {
 						name="notifications"
 						control={control}
 						render={({ field }) => {
-							// Map notifications to have 'name' property for Autocomplete
-							const notificationOptions = (notifications ?? []).map((n) => ({
-								...n,
-								name: n.notificationName,
-							}));
 							const selectedNotifications = notificationOptions.filter((n) =>
 								(field.value ?? []).includes(n.id)
 							);
@@ -762,6 +786,35 @@ const CreateMonitorPage = () => {
 							);
 						}}
 					/>
+				}
+			/>
+
+			<ConfigBox
+				title={t("pages.createMonitor.form.escalationRules.title")}
+				subtitle={t("pages.createMonitor.form.escalationRules.description")}
+				rightContent={
+					<Stack spacing={theme.spacing(LAYOUT.MD)}>
+						<TextField
+							type="number"
+							value={escalationDelayMinutes}
+							fieldLabel={t("pages.createMonitor.form.escalationRules.option.delayMinutes.label")}
+							inputProps={{ min: 1 }}
+							onChange={(event) => {
+								setEscalationDelayMinutes(Math.max(1, Number(event.target.value || 1)));
+							}}
+						/>
+						<Autocomplete
+							multiple
+							options={notificationOptions}
+							value={notificationOptions.filter((option) => escalationChannelIds.includes(option.id))}
+							getOptionLabel={(option) => option.name}
+							fieldLabel={t("pages.createMonitor.form.escalationRules.option.channels.label")}
+							onChange={(_: unknown, newValue: typeof notificationOptions) => {
+								setEscalationChannelIds(newValue.map((option) => option.id));
+							}}
+							isOptionEqualToValue={(option, value) => option.id === value.id}
+						/>
+					</Stack>
 				}
 			/>
 

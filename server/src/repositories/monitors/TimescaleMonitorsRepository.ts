@@ -1,5 +1,13 @@
 import type { Pool } from "pg";
-import type { Monitor, MonitorsSummary, MonitorStatus, MonitorType, MonitorMatchMethod, GeoContinent } from "@/types/monitor.js";
+import type {
+	Monitor,
+	MonitorsSummary,
+	MonitorStatus,
+	MonitorType,
+	MonitorMatchMethod,
+	GeoContinent,
+	MonitorNotificationConfig,
+} from "@/types/monitor.js";
 import type { IMonitorsRepository, TeamQueryConfig, SummaryConfig } from "./IMonitorsRepository.js";
 import { AppError } from "@/utils/AppError.js";
 
@@ -110,15 +118,20 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		// Insert notification associations
 		if (monitor.notifications?.length) {
 			for (const notificationId of monitor.notifications) {
-				await this.pool.query(`INSERT INTO monitor_notifications (monitor_id, notification_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [
-					row.id,
-					notificationId,
-				]);
+				const escalation = monitor.notificationConfig?.find((config) => config.channelId === notificationId)?.escalation;
+				await this.pool.query(
+					`INSERT INTO monitor_notifications (monitor_id, notification_id, escalation_delay_minutes, escalation_channel_id)
+					 VALUES ($1, $2, $3, $4)
+					 ON CONFLICT (monitor_id, notification_id)
+					 DO UPDATE SET escalation_delay_minutes = EXCLUDED.escalation_delay_minutes, escalation_channel_id = EXCLUDED.escalation_channel_id`,
+					[row.id, notificationId, escalation?.delayMinutes ?? null, escalation?.channelId ?? null]
+				);
 			}
 		}
 
 		const entity = this.toEntity(row);
-		entity.notifications = monitor.notifications ?? [];
+		entity.notificationConfig = monitor.notificationConfig ?? (monitor.notifications ?? []).map((channelId) => ({ channelId }));
+		entity.notifications = entity.notificationConfig.map((config) => config.channelId);
 		return entity;
 	};
 
@@ -153,7 +166,10 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		}
 
 		// Populate notifications
-		monitor.notifications = await this.fetchNotificationIds([monitorId]).then((m) => m.get(monitorId) ?? []);
+		const notifMap = await this.fetchNotificationConfigs([monitorId]);
+		const notificationConfig = notifMap.get(monitorId) ?? [];
+		monitor.notificationConfig = notificationConfig;
+		monitor.notifications = notificationConfig.map((config) => config.channelId);
 
 		return monitor;
 	};
@@ -162,9 +178,11 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		const result = await this.pool.query<MonitorRow>(`SELECT ${MONITOR_COLUMNS} FROM monitors`);
 		const monitors = result.rows.map(this.toEntity);
 		if (monitors.length > 0) {
-			const notifMap = await this.fetchNotificationIds(monitors.map((m) => m.id));
+			const notifMap = await this.fetchNotificationConfigs(monitors.map((m) => m.id));
 			for (const monitor of monitors) {
-				monitor.notifications = notifMap.get(monitor.id) ?? [];
+				const notificationConfig = notifMap.get(monitor.id) ?? [];
+				monitor.notificationConfig = notificationConfig;
+				monitor.notifications = notificationConfig.map((config) => config.channelId);
 			}
 		}
 		return monitors;
@@ -341,9 +359,11 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		}
 
 		// Populate notifications in batch
-		const notifMap = await this.fetchNotificationIds(monitorIds);
+		const notifMap = await this.fetchNotificationConfigs(monitorIds);
 		for (const monitor of monitors) {
-			monitor.notifications = notifMap.get(monitor.id) ?? [];
+			const notificationConfig = notifMap.get(monitor.id) ?? [];
+			monitor.notificationConfig = notificationConfig;
+			monitor.notifications = notificationConfig.map((config) => config.channelId);
 		}
 
 		return monitors;
@@ -355,9 +375,11 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		}
 		const result = await this.pool.query<MonitorRow>(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE id = ANY($1)`, [monitorIds]);
 		const monitors = result.rows.map(this.toEntity);
-		const notifMap = await this.fetchNotificationIds(monitorIds);
+		const notifMap = await this.fetchNotificationConfigs(monitorIds);
 		for (const monitor of monitors) {
-			monitor.notifications = notifMap.get(monitor.id) ?? [];
+			const notificationConfig = notifMap.get(monitor.id) ?? [];
+			monitor.notificationConfig = notificationConfig;
+			monitor.notifications = notificationConfig.map((config) => config.channelId);
 		}
 		return monitors;
 	};
@@ -629,15 +651,24 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		if (patch.notifications !== undefined) {
 			await this.pool.query(`DELETE FROM monitor_notifications WHERE monitor_id = $1`, [monitorId]);
 			for (const notificationId of patch.notifications) {
-				await this.pool.query(`INSERT INTO monitor_notifications (monitor_id, notification_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [
-					monitorId,
-					notificationId,
-				]);
+				const escalation = patch.notificationConfig?.find((config) => config.channelId === notificationId)?.escalation;
+				await this.pool.query(
+					`INSERT INTO monitor_notifications (monitor_id, notification_id, escalation_delay_minutes, escalation_channel_id)
+					 VALUES ($1, $2, $3, $4)
+					 ON CONFLICT (monitor_id, notification_id)
+					 DO UPDATE SET escalation_delay_minutes = EXCLUDED.escalation_delay_minutes, escalation_channel_id = EXCLUDED.escalation_channel_id`,
+					[monitorId, notificationId, escalation?.delayMinutes ?? null, escalation?.channelId ?? null]
+				);
 			}
 		}
 
 		const entity = this.toEntity(row);
-		entity.notifications = patch.notifications ?? (await this.fetchNotificationIds([monitorId]).then((m) => m.get(monitorId) ?? []));
+		if (patch.notifications !== undefined) {
+			entity.notificationConfig = patch.notificationConfig ?? patch.notifications.map((channelId) => ({ channelId }));
+		} else {
+			entity.notificationConfig = await this.fetchNotificationConfigs([monitorId]).then((m) => m.get(monitorId) ?? []);
+		}
+		entity.notifications = entity.notificationConfig.map((config) => config.channelId);
 		return entity;
 	};
 
@@ -656,13 +687,14 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 			throw new AppError({ message: `Monitor with ID ${monitorId} not found for the given team.`, status: 404 });
 		}
 		const entity = this.toEntity(row);
-		entity.notifications = await this.fetchNotificationIds([monitorId]).then((m) => m.get(monitorId) ?? []);
+		entity.notificationConfig = await this.fetchNotificationConfigs([monitorId]).then((m) => m.get(monitorId) ?? []);
+		entity.notifications = entity.notificationConfig.map((config) => config.channelId);
 		return entity;
 	};
 
 	deleteById = async (monitorId: string, teamId: string): Promise<Monitor> => {
 		// Fetch notifications before delete (FK cascade will remove join rows)
-		const notifs = await this.fetchNotificationIds([monitorId]).then((m) => m.get(monitorId) ?? []);
+		const notificationConfig = await this.fetchNotificationConfigs([monitorId]).then((m) => m.get(monitorId) ?? []);
 		const result = await this.pool.query<MonitorRow>(`DELETE FROM monitors WHERE id = $1 AND team_id = $2 RETURNING ${MONITOR_COLUMNS}`, [
 			monitorId,
 			teamId,
@@ -672,7 +704,8 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 			throw new AppError({ message: `Monitor with ID ${monitorId} not found for the given team.`, status: 404 });
 		}
 		const entity = this.toEntity(row);
-		entity.notifications = notifs;
+		entity.notificationConfig = notificationConfig;
+		entity.notifications = notificationConfig.map((config) => config.channelId);
 		return entity;
 	};
 
@@ -680,12 +713,13 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		// Fetch notifications before delete
 		const monitorsResult = await this.pool.query<MonitorRow>(`SELECT ${MONITOR_COLUMNS} FROM monitors WHERE team_id = $1`, [teamId]);
 		const monitorIds = monitorsResult.rows.map((r) => r.id);
-		const notifMap = monitorIds.length > 0 ? await this.fetchNotificationIds(monitorIds) : new Map();
+		const notifMap = monitorIds.length > 0 ? await this.fetchNotificationConfigs(monitorIds) : new Map<string, MonitorNotificationConfig[]>();
 
 		const result = await this.pool.query<MonitorRow>(`DELETE FROM monitors WHERE team_id = $1 RETURNING ${MONITOR_COLUMNS}`, [teamId]);
 		const monitors = result.rows.map((row) => {
 			const entity = this.toEntity(row);
-			entity.notifications = notifMap.get(row.id) ?? [];
+			entity.notificationConfig = notifMap.get(row.id) ?? [];
+			entity.notifications = entity.notificationConfig.map((config) => config.channelId);
 			return entity;
 		});
 		return { monitors, deletedCount: result.rowCount ?? 0 };
@@ -938,12 +972,26 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		createdAt: row.created_at.toISOString(),
 	});
 
-	private fetchNotificationIds = async (monitorIds: string[]): Promise<Map<string, string[]>> => {
-		const result = await this.pool.query(`SELECT monitor_id, notification_id FROM monitor_notifications WHERE monitor_id = ANY($1)`, [monitorIds]);
-		const map = new Map<string, string[]>();
+	private fetchNotificationConfigs = async (monitorIds: string[]): Promise<Map<string, MonitorNotificationConfig[]>> => {
+		const result = await this.pool.query(
+			`SELECT monitor_id, notification_id, escalation_delay_minutes, escalation_channel_id
+			 FROM monitor_notifications
+			 WHERE monitor_id = ANY($1)`,
+			[monitorIds]
+		);
+		const map = new Map<string, MonitorNotificationConfig[]>();
 		for (const row of result.rows) {
 			if (!map.has(row.monitor_id)) map.set(row.monitor_id, []);
-			map.get(row.monitor_id)!.push(row.notification_id);
+			map.get(row.monitor_id)!.push({
+				channelId: row.notification_id,
+				escalation:
+					row.escalation_delay_minutes !== null && row.escalation_channel_id
+						? {
+							delayMinutes: Number(row.escalation_delay_minutes),
+							channelId: row.escalation_channel_id,
+						}
+						: undefined,
+			});
 		}
 		return map;
 	};
@@ -1021,6 +1069,7 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 		interval: row.interval_ms,
 		uptimePercentage: row.uptime_percentage ?? undefined,
 		notifications: [],
+		notificationConfig: [],
 		secret: row.secret ?? undefined,
 		cpuAlertThreshold: row.cpu_alert_threshold,
 		cpuAlertCounter: row.cpu_alert_counter,

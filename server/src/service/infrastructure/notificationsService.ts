@@ -1,4 +1,4 @@
-import type { Monitor, MonitorStatusResponse, Notification } from "@/types/index.js";
+import type { Incident, Monitor, MonitorStatusResponse, Notification } from "@/types/index.js";
 import type { NotificationMessage } from "@/types/notificationMessage.js";
 import { IMonitorsRepository, INotificationsRepository } from "@/repositories/index.js";
 import { INotificationProvider } from "./notificationProviders/INotificationProvider.js";
@@ -14,6 +14,7 @@ export interface INotificationsService {
 	updateById(id: string, teamId: string, updateData: Partial<Notification>): Promise<Notification>;
 	deleteById: (id: string, teamId: string) => Promise<Notification>;
 	handleNotifications: (monitor: Monitor, monitorStatusResponse: MonitorStatusResponse, decision: MonitorActionDecision) => Promise<boolean>;
+	sendEscalationNotification: (monitor: Monitor, incident: Incident, channelId: string) => Promise<boolean>;
 
 	sendTestNotification: (notification: Partial<Notification>) => Promise<boolean>;
 	testAllNotifications: (notificationIds: string[]) => Promise<boolean>;
@@ -144,6 +145,72 @@ export class NotificationsService implements INotificationsService {
 
 		// Send notifications based on decision
 		return await this.sendNotifications(monitor, monitorStatusResponse, decision);
+	};
+
+	private buildEscalationMessage(monitor: Monitor, incident: Incident): NotificationMessage {
+		const settings = this.settingsService.getSettings();
+		const clientHost = settings.clientHost || "Host not defined";
+
+		return {
+			type: "monitor_down",
+			severity: "critical",
+			monitor: {
+				id: monitor.id,
+				name: monitor.name,
+				url: monitor.url,
+				type: monitor.type,
+				status: monitor.status,
+			},
+			content: {
+				title: `Escalation: Monitor ${monitor.name} still down`,
+				summary: `Incident for monitor "${monitor.name}" is still unacknowledged. Escalation notification triggered.`,
+				details: [
+					`URL: ${monitor.url}`,
+					`Incident ID: ${incident.id}`,
+					`Started: ${incident.startTime}`,
+				],
+				timestamp: new Date(),
+			},
+			clientHost,
+			metadata: {
+				teamId: monitor.teamId,
+				notificationReason: "escalation",
+			},
+		};
+	}
+
+	sendEscalationNotification = async (monitor: Monitor, incident: Incident, channelId: string): Promise<boolean> => {
+		const notification = await this.notificationsRepository.findById(channelId, monitor.teamId);
+		if (!notification) {
+			this.logger.warn({
+				message: `Escalation channel not found: ${channelId}`,
+				service: SERVICE_NAME,
+				method: "sendEscalationNotification",
+			});
+			return false;
+		}
+
+		const escalationMessage = this.buildEscalationMessage(monitor, incident);
+		return await this.send(
+			notification,
+			monitor,
+			{
+				monitorId: monitor.id,
+				teamId: monitor.teamId,
+				type: monitor.type,
+				status: false,
+				code: incident.statusCode ?? 0,
+				message: incident.message ?? "Escalation triggered",
+			},
+			{
+				shouldCreateIncident: false,
+				shouldResolveIncident: false,
+				shouldSendNotification: true,
+				incidentReason: null,
+				notificationReason: "status_change",
+			},
+			escalationMessage
+		);
 	};
 
 	sendTestNotification = async (notification: Partial<Notification>) => {

@@ -351,6 +351,18 @@ class MongoMonitorsRepository implements IMonitorsRepository {
 		};
 
 		const notificationIds = (doc.notifications ?? []).map((notification) => toStringId(notification));
+		const rawNotificationConfig = (doc.notificationConfig ?? []).map((config) => ({
+			channelId: config.channelId,
+			escalation: config.escalation
+				? {
+						delayMinutes: config.escalation.delayMinutes,
+						channelId: config.escalation.channelId,
+					}
+				: undefined,
+		}));
+		const notificationConfig = notificationIds.map(
+			(channelId) => rawNotificationConfig.find((config) => config.channelId === channelId) ?? { channelId }
+		);
 
 		return {
 			id: toStringId(doc._id),
@@ -374,6 +386,7 @@ class MongoMonitorsRepository implements IMonitorsRepository {
 			interval: doc.interval,
 			uptimePercentage: doc.uptimePercentage ?? undefined,
 			notifications: notificationIds,
+			notificationConfig,
 			secret: doc.secret ?? undefined,
 			cpuAlertThreshold: doc.cpuAlertThreshold,
 			cpuAlertCounter: doc.cpuAlertCounter,
@@ -410,6 +423,18 @@ class MongoMonitorsRepository implements IMonitorsRepository {
 		};
 
 		const notificationIds = (doc.notifications ?? []).map((notification: unknown) => toStringId(notification));
+		const rawNotificationConfig = (doc.notificationConfig ?? []).map((config) => ({
+			channelId: config.channelId,
+			escalation: config.escalation
+				? {
+						delayMinutes: config.escalation.delayMinutes,
+						channelId: config.escalation.channelId,
+					}
+				: undefined,
+		}));
+		const notificationConfig = notificationIds.map(
+			(channelId) => rawNotificationConfig.find((config) => config.channelId === channelId) ?? { channelId }
+		);
 
 		return {
 			id: toStringId(doc._id),
@@ -433,6 +458,7 @@ class MongoMonitorsRepository implements IMonitorsRepository {
 			interval: doc.interval,
 			uptimePercentage: doc.uptimePercentage ?? undefined,
 			notifications: notificationIds,
+			notificationConfig,
 			secret: doc.secret ?? undefined,
 			cpuAlertThreshold: doc.cpuAlertThreshold,
 			cpuAlertCounter: doc.cpuAlertCounter,

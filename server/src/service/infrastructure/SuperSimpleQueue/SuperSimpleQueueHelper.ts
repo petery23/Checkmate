@@ -49,6 +49,7 @@ export interface MonitorActionDecision {
 
 export class SuperSimpleQueueHelper implements ISuperSimpleQueueHelper {
 	static SERVICE_NAME = SERVICE_NAME;
+	private escalationTimers = new Map<string, NodeJS.Timeout>();
 
 	private logger: ILogger;
 	private networkService: INetworkService;
@@ -177,6 +178,12 @@ export class SuperSimpleQueueHelper implements ISuperSimpleQueueHelper {
 						stack: error instanceof Error ? error.stack : undefined,
 					});
 				});
+
+				if (decision.shouldCreateIncident) {
+					this.scheduleEscalationChecks(statusChangeResult.monitor);
+				} else if (decision.shouldResolveIncident) {
+					this.clearEscalationChecks(statusChangeResult.monitor.id);
+				}
 			} catch (error: unknown) {
 				this.logger.warn({
 					message: error instanceof Error ? error.message : "Unknown error",
@@ -454,5 +461,62 @@ export class SuperSimpleQueueHelper implements ISuperSimpleQueueHelper {
 		}
 
 		return decision;
+	}
+
+	private getEscalationTimerKey(monitorId: string, channelId: string): string {
+		return `${monitorId}:${channelId}`;
+	}
+
+	private clearEscalationChecks(monitorId: string): void {
+		for (const [key, timer] of this.escalationTimers.entries()) {
+			if (!key.startsWith(`${monitorId}:`)) {
+				continue;
+			}
+			clearTimeout(timer);
+			this.escalationTimers.delete(key);
+		}
+	}
+
+	private scheduleEscalationChecks(monitor: Monitor): void {
+		const configs = monitor.notificationConfig ?? [];
+		if (!configs.length) {
+			return;
+		}
+
+		for (const config of configs) {
+			if (!config.escalation) {
+				continue;
+			}
+
+			const key = this.getEscalationTimerKey(monitor.id, config.channelId);
+			const existingTimer = this.escalationTimers.get(key);
+			if (existingTimer) {
+				clearTimeout(existingTimer);
+				this.escalationTimers.delete(key);
+			}
+
+			const delayMs = config.escalation.delayMinutes * 60 * 1000;
+			const timer = setTimeout(async () => {
+				try {
+					const activeIncident = await this.incidentsRepository.findActiveByMonitorId(monitor.id, monitor.teamId);
+					if (!activeIncident) {
+						return;
+					}
+
+					await this.notificationsService.sendEscalationNotification(monitor, activeIncident, config.escalation!.channelId);
+				} catch (error: unknown) {
+					this.logger.warn({
+						message: `Failed escalation notification for monitor ${monitor.id}: ${error instanceof Error ? error.message : "Unknown error"}`,
+						service: SERVICE_NAME,
+						method: "scheduleEscalationChecks",
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				} finally {
+					this.escalationTimers.delete(key);
+				}
+			}, delayMs);
+
+			this.escalationTimers.set(key, timer);
+		}
 	}
 }
