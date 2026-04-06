@@ -987,9 +987,9 @@ export class TimescaleMonitorsRepository implements IMonitorsRepository {
 				escalation:
 					row.escalation_delay_minutes !== null && row.escalation_channel_id
 						? {
-							delayMinutes: Number(row.escalation_delay_minutes),
-							channelId: row.escalation_channel_id,
-						}
+								delayMinutes: Number(row.escalation_delay_minutes),
+								channelId: row.escalation_channel_id,
+							}
 						: undefined,
 			});
 		}

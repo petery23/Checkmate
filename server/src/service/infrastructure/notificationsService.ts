@@ -164,11 +164,7 @@ export class NotificationsService implements INotificationsService {
 			content: {
 				title: `Escalation: Monitor ${monitor.name} still down`,
 				summary: `Incident for monitor "${monitor.name}" is still unacknowledged. Escalation notification triggered.`,
-				details: [
-					`URL: ${monitor.url}`,
-					`Incident ID: ${incident.id}`,
-					`Started: ${incident.startTime}`,
-				],
+				details: [`URL: ${monitor.url}`, `Incident ID: ${incident.id}`, `Started: ${incident.startTime}`],
 				timestamp: new Date(),
 			},
 			clientHost,
